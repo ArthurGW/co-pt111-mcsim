@@ -81,7 +81,7 @@ int main ( int argc, char *argv[] )
 
 	if( argc==1 || strcmp(argv[1],"help")==0 ) { /* Test if help has been selected or no arguments set */
 		printf(USAGE, argv[0]);
-		return 3;
+		return 0;
 	}
 
 	time( &start_time );	/* Get current time */
@@ -197,15 +197,17 @@ int main ( int argc, char *argv[] )
 		for(time_index=0;time_index<time_steps+1;time_index++) {
 			fft_mult(0,time_index);	/* Multiply FFTs for t=time_index and t=0 */
 			for(i=0;i<dim/2;i++) {	/* Transfer results from temp. array to ISF average array */
-				ISF_av[time_index*dim+2*i][0]+=temp_ISF[i][0]/repeats;
-				ISF_av[time_index*dim+2*i][1]+=temp_ISF[i][1]/repeats;
-				ISF_av[time_index*dim+2*i+1][0]+=(temp_ISF[i][0]*temp_ISF[i][0])/repeats;
-				ISF_av[time_index*dim+2*i+1][1]+=(temp_ISF[i][1]*temp_ISF[i][1])/repeats;
+				ISF_av[time_index*dim+2*i][0]+=temp_ISF[i][0];
+				ISF_av[time_index*dim+2*i][1]+=temp_ISF[i][1];
+				ISF_av[time_index*dim+2*i+1][0]+=(temp_ISF[i][0]*temp_ISF[i][0]);
+				ISF_av[time_index*dim+2*i+1][1]+=(temp_ISF[i][1]*temp_ISF[i][1]);
 			}		
 		}
 
 		repeat++;
-		if( !(repeat&131071) ) printf("Repeat no.: %d\n",repeat);	/* Display repeat number occasionally */
+		if( !(repeat&131071) ) {
+			printf("Repeat no.: %d\n",repeat);	/* Display repeat number occasionally */
+		}
 
 	} while(repeat<repeats);
 
@@ -214,8 +216,16 @@ int main ( int argc, char *argv[] )
 	free(adatoms);
 	fftw_free(temp_occs); /* Free arrays that are no longer needed */
 
+	// Calculate means and variances
 	for(time_index=0;time_index<time_steps+1;time_index++) {
-		for(i=0;i<dim;i+=2) {	/* Calculate variance by subtracting mean^2 from mean-squared value */
+		for(i=0;i<dim;i+=2) {
+			// Normalise mean and mean-squared by number of repeats
+			ISF_av[time_index*dim+i][0] /= repeats;
+			ISF_av[time_index*dim+i][1] /= repeats;
+			ISF_av[time_index*dim+i+1][0] /= repeats;
+			ISF_av[time_index*dim+i+1][1] /= repeats;
+
+			// Subract (mean)^2 from mean-squared
 			ISF_av[time_index*dim+i+1][0]-=
 					ISF_av[time_index*dim+i][0]*ISF_av[time_index*dim+i][0];
 			ISF_av[time_index*dim+i+1][1]-=
@@ -237,6 +247,7 @@ int main ( int argc, char *argv[] )
 	
 	if( p ) {
 		output(10);	/* Output pair correlation function*/
+		free(G);
 	}
 
 	if( ( err_code=output(11) ) ) {	 /* Write simulation results to file, exit on error */
@@ -246,8 +257,7 @@ int main ( int argc, char *argv[] )
 	fftw_free(ISF_av);
 	fftw_free(fftout);
 	free(occupations);
-	free(G);
-
+	
 	return 0;
 }
 
