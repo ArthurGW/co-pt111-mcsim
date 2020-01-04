@@ -235,8 +235,8 @@ int main ( int argc, char *argv[] )
 	
 	if( e ) printf("Final energy: %f (Total energy: %f)\n",energy*rep/1000.,total_energy()*rep/1000.);
 
-	printf("\nFinal occupations.\n");	/* Display final positions */
-	display_data(0);
+	/*printf("\nFinal occupations.\n");	/* Display final positions */
+	/*display_data(0);*/
 
 	/*printf("\nTransformed data.\n");	/* Display final FFT */
 	/*display_data(1);*/
