@@ -1,0 +1,5 @@
+#!/bin/bash
+
+NAME="montecarlo-$1"
+
+gcc -I. -ggdb -o $NAME.o $NAME.c -lm -lfftw3

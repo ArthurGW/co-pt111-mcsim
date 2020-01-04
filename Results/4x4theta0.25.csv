@@ -1,0 +1,19 @@
+CO/Pt111 System Monte-Carlo Simulation.		Started: Fri Nov 27 16:14:50 2009
+
+
+name=./montecarlo-0.1.0, dim=4, n_co=4, n_sweeps=1, out_name=4x4theta0.25.csv
+Interaction mode: McEwen
+
+----------------------
+
+Pair correlation function.
+Bin resolution: 0.007071068
+
+Bin centre	Probability	Number in bin
+0.7071068	0.166666672	2
+1.2232947	0.500000000	6
+1.4142136	0.333333343	4
+
+----------------------
+
+

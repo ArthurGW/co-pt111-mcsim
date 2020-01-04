@@ -1,0 +1,63 @@
+Update log for montecarlo-x.x.x.c
+
+0.0.1:
+- Set up some basic variables
+- Added command-line argument processing
+- Added various argument tests
+- Added close function, for generic error processing
+
+0.0.2:
+- Added power of 2 requirement for the dimension
+- Chose helical boundary conditions
+- Added initialization function for matrices with calloc memory allocation
+- Added random seed initializer
+- Designed new fast allocation method for high coverages
+
+0.1.0:
+- Added output function
+- Added test_file function to replace code in argument checking and be available to output function
+- Added separation, sweep, select_move, and pair functions - the main body of the code
+
+0.2.0:
+- Added very simple nearest neighbour repulsion
+- Fixed separation function
+
+0.3.0:
+- Added FFT test
+- Added FFT function with plan, forward, inverse
+
+0.4.0:
+- Added FFT output matrix - very large but necessary
+- Write FFT outputs to corresponding point in matrix
+- Added ISF code framework, calling the various functions previously developed
+
+1.0.0:
+- Tidied up program
+- Changed ISF to record variance, for one row of k-space only
+
+1.1.0:
+- Futher smallened k-space: ignored -k
+- Moved array allocations and frees to hopefully add a little bit of speed
+
+1.1.1:
+- Added small timesteps option
+- Changed default repeats to 1m
+- Reintroduced pair correlation function as a test
+
+1.2.0:
+- Exponentiated probabilities
+- Added error calculation - using maximum correlation factor
+- Reduced ISF by n_co
+
+1.3.0:
+- Changed nearest neighbours
+- Changed separation calculation
+- Changed display settings
+- Changed ISF
+
+1.3.1:
+- Added timescale
+- Added outputs suitable for gnuplot
+
+1.4.2:
+- Fixed various issues when using a more modern compiler

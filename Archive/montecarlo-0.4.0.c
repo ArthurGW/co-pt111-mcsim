@@ -1,0 +1,1110 @@
+/* Monte-Carlo simulation of a CO/Pt(111) surface system to replicate observed dynamics.	*/
+/* Written by Arthur Gordon-Wright, ajgw20@bath.ac.uk.						*/
+/* 												*/
+/* Version number 0.4.0, date 08/12/09								*/
+/* Update notes: Added ISF calculation								*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+/*#include <ctype.h>*/
+#include <math.h>
+#include <time.h>
+#include <sys/timeb.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fftw3.h>
+
+#define ONEOVSQRT2 0.707106781186548	/* One over the square root of 2, to save repeated calculation */
+/*#define SQRT3 1.732050807568877	/* Square root of 3 */
+/*#define SQRT3OV8 0.612372435695795	/* Square root of 3 over 8 */
+#define SQRT1OV8 0.353553390593274	/* Square root of 1 over 8 */
+#define UTT 210		/* Top-top diffusion barrier */
+#define USAGE "Usage: %s dim n_co int_mode out_name\n"
+#define OPTIONS "g nsweeps NSWEEPS\n"
+#define LINEWIDTH 22		/* Number of '-' separators in output file dividers */
+#define OUT_NAME_LEN 100	/* Maximum length of output file name (and specified path) */
+#define MAX_OUTSIZE 1048576	/* Maximum output file size (1Mb) */
+#define GRES 100	/* Resolution for pair correlation function - number of bins per lattice vector */
+/*#define time_steps 7	/* Number of different, exponentially spaced time steps to record */
+/*#define time_factor 10	/* Initial value in time step sequence */
+/*#define repeat 50	/* Number of repeats to take for each time step - i.e. normalising factor in ensemble average */
+
+/* Variable declarations */
+char name[30], out_name[OUT_NAME_LEN], outmode='w';
+int dim, n_sites, n_co, int_mode, skip_sweeps=10000, n_sweeps=10000, g=0, bins, time_steps=20, time_factor=2, repeat=10;
+time_t start_time;
+double bin_res;
+fftw_complex *fftout, *fftout_full, *fft_steps, *ISF_av;
+double *temp_occs, *sep_lookup;
+int *occupations, *adatoms/*, *G*/;
+
+/* Function declarations */
+int args ( int , char ** );
+void init_random ( );
+int init_adatoms ( );
+void error_close ( int );
+int output ( int );
+int test_file ( );
+double interaction ( int, int );
+char * int_name ( );
+int sweep ( );
+int select_move ( int , int * );
+double separation ( int, int );
+double separation1 ( int, int );
+void pair ( );
+/*int ** xycoords ( );
+int ** twod_occs ( );*/
+void fft_run ( int, signed int );
+fftw_complex * fft_mult ( int, int );
+
+int main ( int argc, char *argv[] )
+{
+	int err_code, i, j, k, lineindex, bin, time_index, repeats=0, sweeps;
+	fftw_complex * temp_ISF;
+
+	if( argc==1 || strcmp(argv[1],"help")==0 ) { /* Test if help has been selected or no arguments set */
+		printf(USAGE, argv[0]);
+		return 3;
+	}
+
+	time( &start_time );
+
+	init_random();	/* Set random seed */
+
+	if( (err_code=args( argc, argv )) ) { /* Get and test command-line arguments, exit on failure */
+		error_close(err_code);
+	}
+
+	/*bins=GRES*dim;
+	bin_res=ONEOVSQRT2/GRES;
+	G=(int *)malloc(bins*sizeof(int));
+
+	for(i=0;i<bins;i+=2) G[i]=0;*/
+
+	if( ( err_code=init_adatoms() ) ) {	/* Initialise adatom positions, exit on failure */
+		error_close(err_code);
+	}
+
+	output(1); output(2);
+
+	/*separation1(0,0);*/	/* Calculate separation lookup table */
+
+	printf("name=%s, dim=%d, n_co=%d, int_mode=%d, n_sweeps=%d, out_name=%s\n", name, dim, n_co, int_mode, n_sweeps, out_name );
+
+	printf("\nOccupations.\n");
+	printf("+ ");
+	for(j=0;j<dim;j++) printf("- ");
+	printf("+\n");
+	for(j=0;j<n_sites;j++) {
+		if( !((j)&(dim-1)) ) {
+			lineindex=j/dim;
+			for(k=0;k<lineindex+1;k++) printf(" ");
+			printf("\\ ");
+		}
+		if( occupations[j] ) printf("%d ",occupations[j]);
+		else printf("  ");
+		if( !((j+1)&(dim-1)) ) printf("\\\n");
+	}
+	for(j=0;j<dim+1;j++) printf(" ");
+	printf("+ ");
+	for(j=0;j<dim;j++) printf("- ");
+	printf("+\n");
+
+	printf("\nCoordinates.\n");
+	for(i=0;i<n_co;i++)
+		printf("%d ",adatoms[i]);
+	printf("\n\n");
+
+	/* FFT - initialise input and output arrays, then run (with planning) */
+	temp_occs = (double*) fftw_malloc( sizeof(double) * n_sites );
+	fftout=(fftw_complex *) fftw_malloc( 2 * sizeof(double) * n_sites );
+	fftout_full=(fftw_complex *) fftw_malloc( 2 * sizeof(double) * n_sites );
+	fft_steps=(fftw_complex *) fftw_malloc( (time_steps+1) * 2 * sizeof(double) * n_sites );
+	ISF_av=(fftw_complex *) malloc( (time_steps+1) * 2 * sizeof(double) * (n_sites+1) );
+	temp_ISF=(fftw_complex *) fftw_malloc( 2 * sizeof(double) * n_sites );
+
+	fft_run(1,time_steps);
+
+	printf("\nTransformed data.\n");
+	for(i=0;i<n_sites;i++) {
+				printf("%+.3f %+2.3fi\t",fftout_full[i][0],fftout_full[i][1]);
+				if( !((i+1)&(dim-1)) ) printf("\n");
+	}
+
+	output(4);
+
+	for(i=0;i<skip_sweeps;i++) sweep();
+
+	do {
+		time_index=1;
+		sweeps=0;
+
+		for(i=0;i<n_sites;i++) {
+			fft_steps[i][0]=fft_steps[time_steps*n_sites+i][0];
+			fft_steps[i][1]=fft_steps[time_steps*n_sites+i][1];
+		}
+
+		do {
+			sweep();
+			sweeps++;
+
+			if( g ) {
+				system("clear");
+				printf("Sweep #%d:\n",sweeps);
+				printf("+ ");
+				for(j=0;j<dim;j++) printf("- ");
+				printf("+\n");
+				for(j=0;j<n_sites;j++) {
+					if( !((j)&(dim-1)) ) {
+						lineindex=j/dim;
+						for(k=0;k<lineindex+1;k++) printf(" ");
+						printf("\\ ");
+					}
+					if( occupations[j] ) printf("%d ",occupations[j]);
+					else printf("  ");
+					if( !((j+1)&(dim-1)) ) printf("\\\n");
+				}
+				for(j=0;j<dim+1;j++) printf(" ");
+				printf("+ ");
+				for(j=0;j<dim;j++) printf("- ");
+				printf("+\n");
+				sleep(1);
+			}
+
+			/*pair();*/
+
+			if( sweeps==pow(time_factor,time_index) ) {
+				fft_run(0,time_index);
+				printf("Time index: %d\tSweep: %d\n",time_index++,sweeps);
+			}
+
+		} while(time_index<time_steps+1);
+
+		for(time_index=0;time_index<time_steps+1;time_index++) {
+			temp_ISF=fft_mult(0,time_index);
+			for(i=0;i<n_sites;i++) {
+				ISF_av[time_index*(n_sites+1)+i][0]+=temp_ISF[i][0]/repeat;
+				ISF_av[time_index*(n_sites+1)+i][1]+=temp_ISF[i][1]/repeat;
+			}
+			ISF_av[time_index*(n_sites+1)+n_sites][0]+=0.;
+			ISF_av[time_index*(n_sites+1)+n_sites][1]+=(double)time_index/repeat;
+		}
+
+		printf("Repeat no.: %d\n",++repeats);
+
+	} while(repeats<repeat);
+
+	printf("\nFinal occupations.\n");
+	printf("+ ");
+	for(j=0;j<dim;j++) printf("- ");
+	printf("+\n");
+	for(j=0;j<n_sites;j++) {
+		if( !((j)&(dim-1)) ) {
+			lineindex=j/dim;
+			for(k=0;k<lineindex+1;k++) printf(" ");
+			printf("\\ ");
+		}
+		if( occupations[j] ) printf("%d ",occupations[j]);
+		else printf("  ");
+		if( !((j+1)&(dim-1)) ) printf("\\\n");
+	}
+	for(j=0;j<dim+1;j++) printf(" ");
+	printf("+ ");
+	for(j=0;j<dim;j++) printf("- ");
+	printf("+\n");
+
+	fft_run(0,-1);
+
+	printf("\nTransformed data.\n");
+	for(i=0;i<n_sites;i++) {
+				printf("%+.3f %+2.3fi\t",fftout_full[i][0],fftout_full[i][1]);
+				if( !((i+1)&(dim-1)) ) printf("\n");
+	}
+
+	output(2); output(4);
+
+	fft_run(2,-1);
+	fft_run(2,-1);
+
+	printf("\nData to be inverse transformed.\n");
+	for(i=0;i<n_sites;i++) {
+				printf("%+.3f %+2.3fi\t",fftout_full[i][0],fftout_full[i][1]);
+				if( !((i+1)&(dim-1)) ) printf("\n");
+	}
+
+	printf("\nTemp. occupations (IFT).\n");
+	for(i=0;i<n_sites;i++) {
+		printf("%f\t",temp_occs[i]);
+		if( !((i+1)&(dim-1)) ) printf("\n");
+	}
+
+	output(4); output(3);
+
+	/*printf("\aNo. of bins: %d Bin resolution: %1.6f\n",bins,bin_res);
+	printf("Final separations.\n");
+	for(i=0;i<n_co-1;i++) {
+		printf("Coord1: %d Coord2: %d\n", adatoms[i],adatoms[i+1]); 
+		printf("Bin: %d\n",separation(adatoms[i],adatoms[i+1]),
+				(int)floor(.5+separation(adatoms[i],adatoms[i+1])*bin_res) );
+	}*/
+
+	output(6);
+
+	output(8);
+
+	if( ( err_code=output(9) ) ) {	 /* Write simulation results to file, exit on error */
+		error_close(err_code);
+	}
+
+	return 0;
+}
+
+int args ( int argc, char *argv[] )	/* Processes command-line arguments and sets global variables accordingly */
+{					/* Returns 0 if successful */
+	int i, error_code;
+
+	/* Extract program name */
+	sprintf(name,"%s",argv[0]);
+
+	/* Test for minimum valid number of arguments */
+	if( argc<4 ) {
+		printf("Incorrect number of arguments.\n"USAGE, argv[0]);
+		return 2;
+	}
+	
+	/* Extract lattice dimension, number of sites and number of CO adatoms */
+	dim=atoi(argv[1]);
+	n_sites=dim*dim;
+	n_co=atoi(argv[2]);
+
+	/* Test for successful extraction */
+	if( !dim || !n_co ) {
+		printf("Invalid dimension or number of adatoms.  Please specify integer values.\n");
+		return 2;
+	}
+
+	/* Check that specified lattice dimension is a power of 2, to allow bitwise modulus function */
+	if ( (dim-1) & dim ) {
+		printf("For program efficiency, please specify a lattice dimension that is an integer\npower of two.\n");
+		return 2;
+	}
+
+	/* Check for valid specified coverage (i.e. number of sites is >= number of adatoms */
+	if( (dim*dim)<n_co ) {
+		printf("Specified coverage is greater than 100%!\n");
+		return 2;
+	}
+
+	/* Extract required interaction, test for valid option */
+	int_mode=atoi(argv[3]);
+	if( int_mode<0 || int_mode>3 ) {
+		printf("Please enter an interaction mode between 0 and 3.\n");
+		return 2;	
+	}
+
+	/* Extract output file name */
+	if( strlen(argv[4])>100 ) {
+		printf("Specified output file name must be less than 100 characters.\n");
+		return 2;
+	}
+	sprintf(out_name,"%s",argv[4]);
+
+	if( error_code=test_file(1) ) return error_code;
+
+	if( argc==5 ) return 0;	/* Exit successfully if no further arguments */
+
+	/* Process further arguments */
+	for(i=5;i<argc;i++) {
+		if( !strcmp(argv[i],"g") ) {
+			g=1;
+		}
+		else if( !strcmp(argv[i],"nsweeps") && argv[i+1] ) {
+			n_sweeps=atoi(argv[i+1]);
+			if( !n_sweeps ) {
+				printf("Please enter an integer value for optional parameter nsweeps.\n");
+				return 2;
+			}
+			i++;
+		}
+		else if( !strcmp(argv[i],"ssweeps") && argv[i+1] ) {
+			skip_sweeps=atoi(argv[i+1]);
+			if( !skip_sweeps ) {
+				printf("Please enter an integer value for optional parameter ssweeps.\n");
+				return 2;
+			}
+			i++;
+		}
+		else if( !strcmp(argv[i],"tfact") && argv[i+1] ) {
+			time_factor=atoi(argv[i+1]);
+			if( !time_factor ) {
+				printf("Please enter an integer value for optional parameter tfact.\n");
+				return 2;
+			}
+			i++;
+		}
+		else if( !strcmp(argv[i],"tsteps") && argv[i+1] ) {
+			time_steps=atoi(argv[i+1]);
+			if( !time_steps ) {
+				printf("Please enter an integer value for optional parameter tsteps.\n");
+				return 2;
+			}
+			i++;
+		}
+		else if( !strcmp(argv[i],"repeats") && argv[i+1] ) {
+			repeat=atoi(argv[i+1]);
+			if( !repeat ) {
+				printf("Please enter an integer value for optional parameter repeats.\n");
+				return 2;
+			}
+			i++;
+		}
+		else {  /* If argument was not a valid flag, exit */
+			printf("Invalid optional argument.\n");
+			printf("Valid arguments: "OPTIONS);
+			return 2;
+		}
+
+	}
+
+	return 0;
+}
+
+void init_random ( )	/* Initialise random number seed */
+{
+	struct timeb tp;
+
+	ftime(&tp);
+	srandom( (tp.time*1000)+tp.millitm ); /* Use time in milliseconds to ensure no repeats */
+}
+
+int init_adatoms ( )	/* Initialise adatom and occupation arrays, placing atoms at random positions */
+{
+	int i, unallocated=n_sites, index;
+	int free_sites[n_sites];
+
+	printf("Allocating occupation matrix...");
+	occupations=(int *) calloc(n_sites,sizeof(int));	/* Allocate occupation and adatom coordinate arrays */
+	printf("done!\nAllocating adatom coordinate matrix...");
+	adatoms=(int *) calloc(n_co,sizeof(int));
+	printf("done!\n");
+
+	if( occupations==NULL || adatoms==NULL ) return 3;	/* Test for successful allocation */
+
+	for(i=0;i<n_sites;i++) free_sites[i]=i;	/* Set free sites matrix: initially all sites are included */
+
+	for(i=0;i<n_co;i++) {
+		index=(int)floor(unallocated*random()/RAND_MAX);	/* Choose random free site */
+		adatoms[i]=free_sites[index];	/* Place adatom at site */
+		occupations[ adatoms[i] ]=1;	/* Set occupation state for chosen coordinate */
+		free_sites[index]=free_sites[unallocated];/* Replace free site coordinate with highest unalloc. one */
+		unallocated--;	/* Decrement the number of remaining free sites */
+	}
+
+	return 0;
+}
+
+int output ( int out_num )	/* Writes data to output file.  Attempts writing three times, then asks user to */	
+{				/* try a different file, then another, then fails 				*/
+	int i, j, n, attempts=1, success=0, file_no=1, normalisation;
+	FILE *tmp, *out;
+	static char tmp_name[15];
+	char * buffer;
+
+	if( out_num==1 ) {
+		sprintf(tmp_name,"%d.tmp",(int)start_time);
+		printf("tmp_name=%s\n",tmp_name);
+	}
+
+	tmp=fopen(tmp_name,"a");	/* Open temp file */
+
+	/* Write output to temp file. out_num flag sets which stage output to write */	
+	if( out_num==1 ) {	/* Header section */
+
+		fprintf(tmp,"CO/Pt111 System Monte-Carlo Simulation.\t\tStarted: %s\n\n",ctime( &start_time ) );
+
+		fprintf(tmp,"name=%s, dim=%d, n_co=%d, n_sweeps=%d, out_name=%s\n", name, dim, n_co, n_sweeps, out_name );
+		fprintf(tmp,"Interaction mode: %s\n", int_name() );
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==2 ) {	/* Initial positions section */
+		fprintf(tmp,"Coordinates:\n");
+
+		for(i=0;i<n_sites;i++) {
+			fprintf(tmp,"%d ",occupations[i]);
+			if( !((i+1)&(dim-1)) )
+				fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==3 ) {	/* Temp. occs. section */
+		fprintf(tmp,"Temp. occs.:\n");
+
+		for(i=0;i<n_sites;i++) {
+			fprintf(tmp,"%f\t",temp_occs[i]);
+			if( !((i+1)&(dim-1)) )
+				fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==4 ) {
+		fprintf(tmp,"Full fourier transform:\n");
+		for(i=0;i<n_sites;i++) {
+			fprintf(tmp,"%.3f\t%.3f\t\t",fftout_full[i][0],fftout_full[i][1]);
+			if( !((i+1)&(dim-1)) ) fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==5 ) {
+		fprintf(tmp,"Fourier timestep matrix:\n");
+
+		for(i=0;i<n_sites*(time_steps+1);i++) {
+			fprintf(tmp,"%.3f\t%.3f\t\t",fft_steps[i][0],fft_steps[i][1]);
+
+			if( !((i+1)&(dim-1)) ) fprintf(tmp,"\n");
+			if( !((i+1)&(n_sites-1)) ) fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==6 ) {
+		fprintf(tmp,"ISF:\n");
+		for(j=0;j<(n_sites+1)*(time_steps+1);j+=(n_sites+1)) {
+			fprintf(tmp,"%f\t%f\n",ISF_av[j+n_sites][0],ISF_av[j+n_sites][1]);
+			for(i=0;i<n_sites;i++) {
+				fprintf(tmp,"%.3f\t%.3f\t\t",ISF_av[j+i][0],ISF_av[j+i][1]);
+				if( !( (i+1)&(dim-1) ) ) fprintf(tmp,"\n");
+			}
+			fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==7 ) {
+		fprintf(tmp,"Partial fourier transform:\n");
+		for(i=0;i<n_sites/2+dim;i++) {
+			fprintf(tmp,"%.3f\t%.3f\t\t",fftout[i][0],fftout[i][1]);
+			if( !((i+1)%(dim/2+1)) ) fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");
+	}
+	else if( out_num==8 ) {	/* Closing section */
+		/*fprintf(tmp,"Final coordinates:\n");
+
+		for(i=0;i<n_sites;i++) {
+			fprintf(tmp,"%d ",occupations[i]);
+			if( !((i+1)&(dim-1)) )
+				fprintf(tmp,"\n");
+		}
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");*/
+
+		/*fprintf(tmp,"Pair correlation function.\n");
+		normalisation=(n_co)*(n_co-1)*n_sweeps;
+		fprintf(tmp,"Bin resolution: %1.9f, normalisation factor: %d\n\n",bin_res,normalisation);
+		fprintf(tmp,"Bin centre\tProbability\tNumber in bin\n");
+		for(i=0;i<bins;i++)
+			if( G[i] )
+				fprintf(tmp,"%2.4f\t%1.6f\t%d\n",(float)i/GRES,(float)G[i]/normalisation,G[i]);
+
+		fprintf(tmp,"\n");
+		for(i=0;i<LINEWIDTH;i++) fprintf(tmp,"-");
+		fprintf(tmp,"\n\n");*/
+	}
+
+
+	fclose(tmp);
+
+	if( out_num==9 ) {	/* Transfer temporary output to specified file */ 
+		while( !success ) {
+			success=1; /* Assume run is successful unless later set otherwise */
+
+			if( !(tmp=fopen(tmp_name,"r")) ) success=0;	/* Open temp file for reading */
+
+			if( !(out=fopen(out_name,&outmode)) ) success=0;	/* Open output file */
+
+			buffer=(char *) malloc(MAX_OUTSIZE);	/* Read temp to buffer then write to output */
+			n=fread(buffer,1,MAX_OUTSIZE,tmp);
+			printf("n=%d\n",n);
+			if( ferror(tmp) ) success=0;
+			else {
+				fwrite(buffer,1,n,out);
+				fputc('\n',out);
+				if( ferror(out) ) success=0;
+			}
+
+			fclose(tmp);	/* Close files */
+			fclose(out);
+
+			if( !success ) {
+				printf("Attempt #%d to write output file failed.\n",attempts);
+
+				attempts++;
+
+				if( attempts==4 ) {	/* After three attempts at using a file, try another, 	*/
+					file_no++;	/* assuming less than three have been tried 		*/
+					if( file_no<4 ) {
+						attempts=1;
+						do {	/* Keep asking for a new file until a correct one is specified */
+							printf("Cannot write to output file.  Please specify another:\n");
+							scanf("%s",&out_name);
+						} while( test_file() );
+					}
+					else {	/* If next file would be the fourth, exit */
+						return 4;
+					}
+				}
+			}
+		}
+		remove(tmp_name);
+	}
+
+	printf("Output #%d successfully written.\n",out_num);
+	return 0;
+}
+
+void error_close ( int code )	/* Terminates the program on error with appropriate message and return value */
+{
+	if( code==1 )
+		printf("(q)uit selected.\nExiting %s...\n",name);
+	else if( code==2 )
+		printf("Invalid command-line arguments.\nExiting %s...\n",name);
+	else if( code==3 )
+		printf("Memory allocation failed when initialising arrays.\nExiting %s...\n",name);
+	else if( code==4 )
+		printf("Output file writing failed.  Temporary file not deleted.\nExiting %s...\n",name);		
+	else {
+		printf("Program failed with unknown error.\nExiting %s...\n",name);
+	}
+
+	exit(code);
+}
+
+int test_file ( )	/* Tests output file is valid. Returns 0 on success or various errors on failure */
+{
+	FILE *testfile;
+	struct stat buf;
+
+	/* Check if output file is a directory */
+	if( !stat(out_name,&buf) )
+		if( S_ISDIR(buf.st_mode) ) {
+			printf("Specified output file is a directory.\n");
+			return 2;
+		}
+	
+	/* Test if output file already exists */
+	if( access(out_name,F_OK)==-1 ) {	/* File does not exist.  Test file opening */
+
+		testfile=fopen(out_name,&outmode);
+
+		if( testfile==NULL ) {	/* File could not be created */
+			printf("Specified output file cannot be created.\n");
+			return 2;
+		}
+
+		fclose(testfile);	/* Close and remove file for now if creation is possible */
+		remove(out_name);
+	}
+	else {	/* File exists.  Test if it is writable */
+
+		if( access(out_name,W_OK) ) {	/* Not writable */
+			printf("You do not have write access to the specified output file.\n");
+			return 2;
+
+		}
+		else {	/* File exists and is writable.  Ask for overwrite or append mode */
+			printf("Specified output file already exists.\nover(w)rite (a)ppend (q)uit? ");
+			scanf("%c",&outmode);
+
+			/* Test if user selected valid output mode */
+			while( outmode!='w' && outmode!='a' ) {
+				if( outmode=='q' ) return 1;	/* User selected quit */
+				printf("Invalid output mode selected.\nover(w)rite (a)ppend (q)uit? ");
+				scanf("%c",&outmode);
+			}
+			if( outmode=='w' ) printf("Overwrite mode selected.  ");
+			else printf("Append mode selected.  ");
+		}
+	}
+
+	printf("Output file ok.\n");	
+	return 0;
+}
+
+double interaction ( int coord1, int coord2 )
+{
+	return 0;	
+}
+
+double separation ( int coord1, int coord2 )
+{
+	unsigned int i, num_mirrors, sep, new_sep; 
+	signed int twodx, twodx_m, dy, dy_m;
+
+	static signed int mirrors[8];
+	signed int current_mirrors[6]={0,0,0,0,0,0};
+	static int flag=0;
+
+	if( !flag ) {
+		mirrors[0]=dim;
+		mirrors[1]=2*dim;
+		mirrors[2]=3*dim-1;
+		mirrors[3]=2*dim-2;
+		mirrors[4]=2*dim-1;
+		mirrors[5]=-2;
+		mirrors[6]=dim-1;
+		mirrors[7]=-2*dim-2;
+		flag++;
+	}
+
+	dy=(int)floor(coord2/dim) - (int)floor(coord1/dim);
+	twodx=2 * ( (coord2&(dim-1)) - (coord1&(dim-1)) ) + dy;
+
+	sep=(twodx*twodx)+(3*dy*dy);
+
+	if( twodx-dy>0 ) {
+		if( dy>0 ) {
+			num_mirrors=3;
+			current_mirrors[0]=-1*mirrors[0];
+			current_mirrors[1]=-1*mirrors[1];
+			current_mirrors[2]=-1*mirrors[2];
+			current_mirrors[3]=-1*mirrors[3];
+			current_mirrors[4]=-1*mirrors[4];
+			current_mirrors[5]=-1*mirrors[5];
+		}
+		else if( dy<-1 ) {
+			num_mirrors=3;
+			current_mirrors[0]=mirrors[0];
+			current_mirrors[1]=mirrors[1];
+			current_mirrors[2]=-1*mirrors[4];
+			current_mirrors[3]=-1*mirrors[5];
+			current_mirrors[4]=-1*mirrors[6];
+			current_mirrors[5]=-1*mirrors[7];
+		}
+		else {
+			num_mirrors=1;
+			current_mirrors[0]=-1*mirrors[4];
+			current_mirrors[1]=-1*mirrors[5];
+		}
+	}
+	else if( twodx-dy<0 ) {
+		if( dy>1 ) {
+			num_mirrors=3;
+			current_mirrors[0]=-1*mirrors[0];
+			current_mirrors[1]=-1*mirrors[1];
+			current_mirrors[2]=mirrors[4];
+			current_mirrors[3]=mirrors[5];
+			current_mirrors[4]=mirrors[6];
+			current_mirrors[5]=mirrors[7];
+		}
+		else if( dy<0 ) {
+			num_mirrors=3;
+			current_mirrors[0]=mirrors[0];
+			current_mirrors[1]=mirrors[1];
+			current_mirrors[2]=mirrors[2];
+			current_mirrors[3]=mirrors[3];
+			current_mirrors[4]=mirrors[4];
+			current_mirrors[5]=mirrors[5];
+		}
+		else {
+			num_mirrors=1;
+			current_mirrors[0]=mirrors[4];
+			current_mirrors[1]=mirrors[5];
+		}
+	}
+	else {
+		num_mirrors=1;
+		if( dy>0 ) {
+			current_mirrors[0]=-1*mirrors[0];
+			current_mirrors[1]=-1*mirrors[1];
+		}
+		else {
+			current_mirrors[0]=mirrors[0];
+			current_mirrors[1]=mirrors[1];
+		}
+	}
+
+
+	for(i=0;i<2*num_mirrors;i+=2) {
+		twodx_m=twodx+current_mirrors[i];
+		dy_m=dy+current_mirrors[i+1]/2;
+
+		new_sep=(twodx_m*twodx_m)+(3*dy_m*dy_m);
+		sep = ( sep <= new_sep ) ? sep : new_sep;
+	}
+
+	return SQRT1OV8*sqrt(sep);
+
+}
+
+int select_move ( int coord, int * nn )
+{
+	int index;
+
+	/* Select random move */
+	index=(int)floor(6*random()/RAND_MAX);
+
+	if( occupations[ nn[index] ] ) return coord;
+	else return nn[index];
+}
+
+int sweep ( )
+{
+	int i,j,k,lineindex,atom,coord,move_coord,nn[6],nns,mnns;
+
+	for(i=0;i<n_co;i++) {
+
+		/* Select random adatom */
+		atom=(int)floor(n_co*random()/RAND_MAX);
+		coord=adatoms[atom];
+
+		nns=get_nns(coord,nn);	/* Populate nearest neighbour coordinate matrix */
+
+		move_coord=select_move(coord,nn);	/* Select random move */
+		if( move_coord==coord ) continue;	/* If no move selected, go to next atom */
+
+		mnns=get_nns(move_coord,nn)-1;
+
+		/* Simple test interaction model */
+		if( !int_mode || mnns<=nns || ( (random()/RAND_MAX) < (4+nns-mnns)/6 ) ) {
+			occupations[adatoms[atom]]=0;
+			occupations[move_coord]=1;
+			adatoms[atom]=move_coord;
+			continue;
+		}
+	}
+
+	return 0;
+}
+
+char * int_name ( )
+{
+	if( int_mode==0 ) return "None";
+	if( int_mode==1 ) return "Nearest neighbour";
+	if( int_mode==2 ) return "Petrova";
+	if( int_mode==3 ) return "Persson";
+}
+
+/*void pair ( )
+{
+	int i,j,bin;
+	double ijsep;
+
+	for(i=0;i<n_co;i++) {
+		j=0;
+		while( j<n_co ) {
+			if( i==j ) {
+				j++;
+				continue;
+			}
+				
+			ijsep=separation1(adatoms[i],adatoms[j]);
+			bin=(int)floor(.5+ijsep*GRES/ONEOVSQRT2);
+
+			G[bin]++;
+			
+			j++;
+		}
+	}
+}*/
+
+int get_nns ( int coord, int * nn )
+{
+	int j,sum=0;
+
+	nn[0]=(coord+1)&(n_sites-1);
+	nn[1]=(coord-1+n_sites)&(n_sites-1);
+	nn[2]=(coord+dim)&(n_sites-1);
+	nn[3]=(coord-dim+n_sites)&(n_sites-1);
+	nn[4]=(coord+(dim-1)+n_sites)&(n_sites-1);
+	nn[5]=(coord-(dim-1)+n_sites)&(n_sites-1);
+
+	for(j=0;j<6;j++) sum+=occupations[ nn[j] ];
+
+	return sum;
+}
+
+/*int ** xycoords ( )
+{
+	int i,**coords;
+
+	coords=(int *) malloc(sizeof(int)*n_co*2);
+
+	for(i=0;i<n_co;i++) {
+		coords[i][0]=adatoms[i]%(dim-1);
+		coords[i][1]=(int)floor(adatoms[i]/dim);
+	}
+
+	return coords;
+}*/
+
+/*int ** twod_occs ( )
+{
+	int i,j,**occs;
+
+	occs=(int **) malloc(sizeof(int)*n_sites);
+
+	for(i=0;i<dim;i++)
+		for(j=0;j<dim;j++)
+			occs[i][j]=occupations[i*dim+j];
+
+	return occs;
+}*/
+
+void fft_run ( int mode, int time_index )
+{
+	int i,j;
+	static int last_run;
+	static fftw_plan fft_occs, ifft_occs;
+	static flag=0;
+
+	if( mode&1 ) {	/* Plan mode */
+		for(i=0;i<n_sites;i++) temp_occs[i]=(double)occupations[i]; /* Set up occupations matrix (temp.   */
+									/* as matrix is modified during planning) */
+
+		printf("Planning forward FFT...\n");
+		fft_occs=fftw_plan_dft_r2c_2d(dim,dim,temp_occs,fftout,FFTW_MEASURE); /* Plan normal transform */
+
+		for(i=0;i<n_sites;i++) temp_occs[i]=(double)occupations[i];	/* Repopulate occs. matrix */
+		fftw_execute(fft_occs);				/* Run normal transform */
+
+		printf("Planning inverse FFT...\n");	/* Plan the inverse transform */
+		ifft_occs=fftw_plan_dft_c2r_2d(dim,dim,fftout,temp_occs,FFTW_MEASURE);
+	}
+
+	if( mode&2 ) {	/* Inverse mode */
+		/*printf("Running inverse FFT...\n");*/
+
+		if( last_run&2 ) {	/* Do not run inverse twice in a row - result would be meaningless */
+			printf("Inverse already run!\n");
+		}
+		else if( mode&1 ) {/* If in plan mode, inverse also not valid - forward has not been carried out yet */
+			printf("Run forward transform first.\n");
+		}
+		else {
+			fftw_execute(ifft_occs);	/* Run inverse FFT */
+		}
+
+		last_run=mode;
+	}
+	else {	/* Normal mode - writes output to appropriate time step position in storage matrix */
+		/*printf("Running forward FFT...\n");*/
+
+		for(i=0;i<n_sites;i++) {
+			temp_occs[i]=(double)occupations[i];	/* Populate temp. occs. array */
+		}
+
+		fftw_execute(fft_occs);		/* Run */
+
+		/*if(flag<3) output(7);*/
+
+		/* Populate full FFT output array for returning */
+		for(i=dim-1;i>=0;i--) {
+			for(j=dim/2;j>=0;j--) {
+				fftout_full[i*dim+j+(dim/2-1)][0]=fftout[i*(dim/2+1)+j][0];
+				fftout_full[i*dim+j+(dim/2-1)][1]=fftout[i*(dim/2+1)+j][1];
+			}
+			for(j=1;j<dim/2;j++) {
+				fftout_full[i*dim+(dim/2-1)-j][0]=fftout_full[i*dim+(dim/2-1)+j][0];
+				fftout_full[i*dim+(dim/2-1)-j][1]=-1*fftout_full[i*dim+(dim/2-1)+j][1];
+			}
+		}
+
+		/*if(flag<3) output(4);*/
+
+		if( time_index>=0 )
+			for(i=0;i<n_sites;i++) {
+				fft_steps[time_index*n_sites+i][0]=fftout_full[i][0];
+				fft_steps[time_index*n_sites+i][1]=fftout_full[i][1];
+			}
+
+		/*if(flag<3) { output(5); flag++; }*/
+
+		last_run=mode;
+	}
+}
+
+fftw_complex * fft_mult ( int index1, int index2 )
+{
+	int i,j,k,offset1,offset2,mult_row;
+	fftw_complex *step1, *step2, *result;
+	double step1_re,step1_im,step2_re,step2_im;
+	
+	step1=(fftw_complex *) calloc(n_sites,2*sizeof(double));
+	step2=(fftw_complex *) calloc(n_sites,2*sizeof(double));
+	result=(fftw_complex *) calloc(n_sites,2*sizeof(double));
+	
+	offset1=index1*n_sites;
+	offset2=index2*n_sites;
+	
+	for(i=0;i<n_sites;i+=dim)	/* Populate temporary matrices to multiply */
+		for(j=0;j<dim;j++) {
+			step2[i+j][0]=fft_steps[offset1+i+j][0];
+			step2[i+j][1]=fft_steps[offset1+i+j][1];
+			
+			step1[i+j][0]=fft_steps[offset2+i+j][0];
+			step1[i+j][1]=-1*fft_steps[offset2+i+j][1];
+		}
+	
+	for(i=0;i<n_sites;i+=dim)	/* Perform multiplication */
+		for(j=0;j<dim;j++) {
+			result[i+j][0]=0.;
+			result[i+j][1]=0.;
+			
+			for(k=0;k<dim;k++) {
+				mult_row=k*dim;
+				step1_re=step1[i+k][0];
+				step1_im=step1[i+k][1];
+				step2_re=step2[mult_row+j][0];
+				step2_im=step2[mult_row+j][1];
+				
+				result[i+j][0]+=step1_re*step2_re-step1_im*step2_im;
+				result[i+j][1]+=step1_im*step2_re+step1_re*step2_im;
+			}
+		}
+	
+	/*result[n_sites][0]=(double)index1;
+	result[n_sites][1]=(double)index2;*/
+
+	/*for(i=0;i<n_sites;i++) { fftout_full[i][0]=result[i][0];fftout_full[i][1]=result[i][1]; }
+	output(4);*/
+	
+	return result;
+}
+
+/*double separation1 ( int coord1, int coord2 )
+{
+	unsigned int i, j, k, num_mirrors, sep, new_sep, count=1; 
+	signed int twodx, twodx_m, dy, dy_m;
+
+	signed int mirrors[8];
+	signed int current_mirrors[6]={0,0,0,0,0,0};
+
+	if( !coord1 & !coord2 ) {
+		printf("Creating separation lookup table...");
+
+		sep_lookup=(double *) fftw_malloc( (6*dim-5) * dim * sizeof(double) );
+
+		mirrors[0]=dim;
+		mirrors[1]=2*dim;
+		mirrors[2]=3*dim-1;
+		mirrors[3]=2*dim-2;
+		mirrors[4]=2*dim-1;
+		mirrors[5]=-2;
+		mirrors[6]=dim-1;
+		mirrors[7]=-2*dim-2;		
+
+		for(i=0;i<6*dim-5;i++) {
+			for(j=0;j<dim;j++){
+			
+				twodx=2*(-1.5*(dim-1)+0.5*i);
+				dy=j;
+
+				sep=(twodx*twodx)+(3*dy*dy);
+
+				if( twodx-dy>0 ) {
+					if( dy>0 ) {
+						num_mirrors=3;
+						current_mirrors[0]=-1*mirrors[0];
+						current_mirrors[1]=-1*mirrors[1];
+						current_mirrors[2]=-1*mirrors[2];
+						current_mirrors[3]=-1*mirrors[3];
+						current_mirrors[4]=-1*mirrors[4];
+						current_mirrors[5]=-1*mirrors[5];
+					}
+					else if( dy<-1 ) {
+						num_mirrors=3;
+						current_mirrors[0]=mirrors[0];
+						current_mirrors[1]=mirrors[1];
+						current_mirrors[2]=-1*mirrors[4];
+						current_mirrors[3]=-1*mirrors[5];
+						current_mirrors[4]=-1*mirrors[6];
+						current_mirrors[5]=-1*mirrors[7];
+					}
+					else {
+						num_mirrors=1;
+						current_mirrors[0]=-1*mirrors[4];
+						current_mirrors[1]=-1*mirrors[5];
+					}
+				}
+				else if( twodx-dy<0 ) {
+					if( dy>1 ) {
+						num_mirrors=3;
+						current_mirrors[0]=-1*mirrors[0];
+						current_mirrors[1]=-1*mirrors[1];
+						current_mirrors[2]=mirrors[4];
+						current_mirrors[3]=mirrors[5];
+						current_mirrors[4]=mirrors[6];
+						current_mirrors[5]=mirrors[7];
+					}
+					else if( dy<0 ) {
+						num_mirrors=3;
+						current_mirrors[0]=mirrors[0];
+						current_mirrors[1]=mirrors[1];
+						current_mirrors[2]=mirrors[2];
+						current_mirrors[3]=mirrors[3];
+						current_mirrors[4]=mirrors[4];
+						current_mirrors[5]=mirrors[5];
+					}
+					else {
+						num_mirrors=1;
+						current_mirrors[0]=mirrors[4];
+						current_mirrors[1]=mirrors[5];
+					}
+				}
+				else {
+					num_mirrors=1;
+					if( dy>0 ) {
+						current_mirrors[0]=-1*mirrors[0];
+						current_mirrors[1]=-1*mirrors[1];
+					}
+					else {
+						current_mirrors[0]=mirrors[0];
+						current_mirrors[1]=mirrors[1];
+					}
+				}
+
+				for(k=0;k<2*num_mirrors;k+=2) {
+					twodx_m=twodx+current_mirrors[k];
+					dy_m=dy+current_mirrors[k+1]/2;
+	
+					new_sep=(twodx_m*twodx_m)+(3*dy_m*dy_m);
+					sep = ( sep <= new_sep ) ? sep : new_sep;
+				}
+
+				sep_lookup[i*(6*dim-5)+j]=sqrt(sep);
+			}
+		}
+
+		printf("done!\n");
+	}
+
+	dy=(int)floor(coord2/dim) - (int)floor(coord1/dim);
+	twodx=2 * ( (coord2&(dim-1)) - (coord1&(dim-1)) ) + dy;
+
+	if(dy<0) { dy*=-1; twodx*=-1; }
+
+	return SQRT1OV8*sep_lookup[(twodx+3*(dim-1))*(6*dim-5)+dy];
+
+}*/
