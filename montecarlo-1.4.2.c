@@ -231,21 +231,22 @@ int main ( int argc, char *argv[] )
 	/*printf("\nTransformed data.\n");	/* Display final FFT */
 	/*display_data(1);*/
 
-	output(2); output(4);	/* Output final positions and FFT, then free arrays */
-	free(occupations);
-	fftw_free(fftout);
+	output(2); output(4);	/* Output final positions and FFT*/
 
-	output(6);	/* Output ISF data then free array */
-	fftw_free(ISF_av);
-
+	output(6);	/* Output ISF data*/
+	
 	if( p ) {
-		output(10);	/* Output pair correlation function then free array */
-		free(G);
+		output(10);	/* Output pair correlation function*/
 	}
 
 	if( ( err_code=output(11) ) ) {	 /* Write simulation results to file, exit on error */
 		error_close(err_code);
 	}
+
+	fftw_free(ISF_av);
+	fftw_free(fftout);
+	free(occupations);
+	free(G);
 
 	return 0;
 }
