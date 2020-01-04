@@ -20,7 +20,7 @@ Update notes: Various fixes to run on a different compiler, especially random()-
 #define SQRT1OV8 0.353553391		/* Square root of 1 over 8 */
 #define UTT 210		/* Top-top diffusion barrier in meV */
 #define USAGE "Usage: %s dim n_co int_mode out_name\n"
-#define OPTIONS "g p s tfact TFACT tsteps TSTEPS repeats REPEATS\n"
+#define OPTIONS "g p s tfact TFACT tsteps TSTEPS repeats REPEATS rep REP\n"
 #define LINEWIDTH 22		/* Number of '-' separators in output file dividers */
 #define OUT_NAME_LEN 100	/* Maximum length of output file name (and specified path) */
 #define MAX_OUTSIZE 1048576	/* Maximum output file size (1Mb) */
